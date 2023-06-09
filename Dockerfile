@@ -1,5 +1,5 @@
 # 基于 Maven 和 Java 17 镜像构建 Docker 镜像
-FROM maven:3.8.3-openjdk-17 AS build
+FROM gradle:jdk17 AS build
 # 指定工作目录
 WORKDIR /app
 # 将项目文件复制到容器中
