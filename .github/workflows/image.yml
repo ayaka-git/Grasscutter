@@ -1,5 +1,4 @@
-name: auto-build
-
+name: image-build
 
 on:
   push:
