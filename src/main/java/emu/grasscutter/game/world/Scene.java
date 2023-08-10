@@ -31,6 +31,7 @@ import emu.grasscutter.scripts.data.*;
 import emu.grasscutter.server.event.entity.EntityCreationEvent;
 import emu.grasscutter.server.event.player.PlayerTeleportEvent;
 import emu.grasscutter.server.packet.send.*;
+import emu.grasscutter.server.scheduler.ServerTaskScheduler;
 import emu.grasscutter.utils.objects.KahnsSort;
 import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
 import java.util.*;
@@ -51,7 +52,6 @@ public final class Scene {
     @Getter private final Set<SceneGroup> loadedGroups;
     @Getter private final BlossomManager blossomManager;
     private final HashSet<Integer> unlockedForces;
-    private final List<Runnable> afterLoadedCallbacks = new ArrayList<>();
     private final long startWorldTime;
     @Getter @Setter DungeonManager dungeonManager;
     @Getter Int2ObjectMap<Route> sceneRoutes;
@@ -68,7 +68,11 @@ public final class Scene {
     @Getter private int tickCount = 0;
     @Getter private boolean isPaused = false;
 
+    private final List<Runnable> afterLoadedCallbacks = new ArrayList<>();
+    private final List<Runnable> afterHostInitCallbacks = new ArrayList<>();
+
     @Getter private GameEntity sceneEntity;
+    @Getter private final ServerTaskScheduler scheduler;
 
     public Scene(World world, SceneData sceneData) {
         this.world = world;
@@ -92,6 +96,7 @@ public final class Scene {
         this.blossomManager = new BlossomManager(this);
         this.unlockedForces = new HashSet<>();
         this.sceneEntity = new EntityScene(this);
+        this.scheduler = new ServerTaskScheduler();
     }
 
     public int getId() {
@@ -104,6 +109,13 @@ public final class Scene {
 
     public int getPlayerCount() {
         return this.getPlayers().size();
+    }
+
+    /**
+     * @return The scene's world's host.
+     */
+    public Player getHost() {
+        return this.getWorld().getHost();
     }
 
     public GameEntity getEntityById(int id) {
@@ -524,6 +536,10 @@ public final class Scene {
             return;
         }
 
+        if (!isPaused) {
+            this.getScheduler().runTasks();
+        }
+
         if (this.getScriptManager().isInit()) {
             // this.checkBlocks();
             this.checkGroups();
@@ -556,10 +572,6 @@ public final class Scene {
         this.finishLoading();
         this.checkPlayerRespawn();
         if (this.tickCount++ % 10 == 0) this.broadcastPacket(new PacketSceneTimeNotify(this));
-        if (this.getPlayerCount() <= 0 && !this.dontDestroyWhenEmpty) {
-            this.getScriptManager().onDestroy();
-            this.getWorld().deregisterScene(this);
-        }
     }
 
     /** Validates a player's current position. Teleports the player if the player is out of bounds. */
@@ -682,6 +694,29 @@ public final class Scene {
         this.afterLoadedCallbacks.add(runnable);
     }
 
+    /**
+     * Invoked when a player initializes loading the scene.
+     *
+     * @param player The player that initialized loading the scene.
+     */
+    public void playerSceneInitialized(Player player) {
+        // Check if the player is the host.
+        if (!player.equals(this.getHost())) return;
+
+        // Run all callbacks.
+        this.afterHostInitCallbacks.forEach(Runnable::run);
+        this.afterHostInitCallbacks.clear();
+    }
+
+    /**
+     * Run a callback when the host initializes loading the scene.
+     *
+     * @param runnable The callback to be executed.
+     */
+    public void runWhenHostInitialized(Runnable runnable) {
+        this.afterHostInitCallbacks.add(runnable);
+    }
+
     public int getEntityLevel(int baseLevel, int worldLevelOverride) {
         int level = worldLevelOverride > 0 ? worldLevelOverride + baseLevel - 22 : baseLevel;
         level = Math.min(level, 100);
@@ -696,18 +731,6 @@ public final class Scene {
             npcBornEntries.addAll(loadNpcForPlayer(player));
         }
 
-        // clear the unreachable group for client
-        var toUnload =
-                this.npcBornEntrySet.stream()
-                        .filter(i -> !npcBornEntries.contains(i))
-                        .map(SceneNpcBornEntry::getGroupId)
-                        .toList();
-
-        if (toUnload.size() > 0) {
-            broadcastPacket(new PacketGroupUnloadNotify(toUnload));
-            Grasscutter.getLogger().trace("Unload NPC Group {}", toUnload);
-        }
-        // exchange the new npcBornEntry Set
         this.npcBornEntrySet = npcBornEntries;
     }
 
@@ -854,7 +877,7 @@ public final class Scene {
                         .collect(Collectors.toSet());
 
         for (var group : this.loadedGroups) {
-            if (!visible.contains(group.id) && !group.dynamic_load)
+            if (!visible.contains(group.id) && !group.dynamic_load && !group.dontUnload)
                 unloadGroup(scriptManager.getBlocks().get(group.block_id), group.id);
         }
 
@@ -1160,14 +1183,27 @@ public final class Scene {
                         pos.toDoubleArray(),
                         Grasscutter.getConfig().server.game.loadEntitiesForPlayerRange);
 
-        var sceneNpcBornEntries =
+        var sceneNpcBornCanidates =
                 npcList.stream().filter(i -> !this.npcBornEntrySet.contains(i)).toList();
+
+        List<SceneNpcBornEntry> sceneNpcBornEntries = new ArrayList<>();
+        sceneNpcBornCanidates.forEach(
+                i -> {
+                    var groupInstance = scriptManager.getGroupInstanceById(i.getGroupId());
+                    if (groupInstance == null) return;
+                    if (i.getSuiteIdList() != null
+                            && !i.getSuiteIdList().contains(groupInstance.getActiveSuiteId())) return;
+                    sceneNpcBornEntries.add(i);
+                });
 
         if (sceneNpcBornEntries.size() > 0) {
             this.broadcastPacket(new PacketGroupSuiteNotify(sceneNpcBornEntries));
             Grasscutter.getLogger().trace("Loaded Npc Group Suite {}", sceneNpcBornEntries);
         }
-        return npcList;
+
+        return npcList.stream()
+                .filter(i -> this.npcBornEntrySet.contains(i) || sceneNpcBornEntries.contains(i))
+                .toList();
     }
 
     public void loadGroupForQuest(List<QuestGroupSuite> sceneGroupSuite) {

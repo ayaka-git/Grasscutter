@@ -113,7 +113,13 @@ public class EntityMonster extends GameEntity {
                 if(monster != null) affixes = monster.affix;
             }
 
-            if (affixes != null) {
+            if (monsterData != null) {
+                // TODO: Research if group affixes goes first
+                if (affixes == null) affixes = monsterData.getAffix();
+                else affixes.addAll(monsterData.getAffix());
+            }
+
+            if(affixes != null) {
                 for(var affixId : affixes) {
                     var affix = GameData.getMonsterAffixDataMap().get(affixId.intValue());
                     if (!affix.isPreAdd()) continue;
@@ -229,7 +235,7 @@ public class EntityMonster extends GameEntity {
         getScene().getScriptManager().callEvent(new ScriptArgs(this.getGroupId(), EVENT_SPECIFIC_MONSTER_HP_CHANGE, getConfigId(), monsterData.getId())
             .setSourceEntityId(getId())
             .setParam3((int) this.getFightProperty(FightProperty.FIGHT_PROP_CUR_HP))
-            .setEventSource(Integer.toString(getConfigId())));
+            .setEventSource(getConfigId()));
     }
 
     @Override
